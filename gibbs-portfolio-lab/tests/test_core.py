@@ -61,3 +61,17 @@ def test_cost_bps(prices):
     # strategies 1 to 3 never trade, so they are unchanged
     pd.testing.assert_series_equal(before[0], buy_and_hold(prices, eq, START))
     pd.testing.assert_series_equal(before[1], buy_and_hold(prices, hold_w, START))
+
+
+def test_simulate_prices(prices):
+    from lab.core import simulate_prices
+    a = simulate_prices(prices.index, prices.columns, 1)
+    pd.testing.assert_frame_equal(a, simulate_prices(prices.index, prices.columns, 1))
+    assert not a.equals(simulate_prices(prices.index, prices.columns, 2))
+    assert (a > 0).all().all() and a.shape == prices.shape
+    risk_on(a, START)  # enough history for the risk estimate
+
+
+def test_optimal_temperature(prices):
+    from lab.core import optimal_temperature
+    assert 2 <= optimal_temperature(prices, START, "2021-01-04") <= 50

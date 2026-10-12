@@ -77,3 +77,31 @@ def max_drawdown(series: pd.Series) -> float:
 def rolling_vol(series: pd.Series) -> pd.Series:
     """12-month (252 day) annualized volatility of a value series, in percent."""
     return series.pct_change().rolling(WINDOW, min_periods=20).std() * np.sqrt(WINDOW) * 100
+
+
+def simulate_prices(index: pd.DatetimeIndex, columns, seed: int) -> pd.DataFrame:
+    """Random-walk prices (geometric Brownian motion) on the same calendar as the real data.
+
+    Each sector draws its own fixed volatility (10-40%/yr) and drift (mean 7%/yr), so the
+    true risk ranking is known and stable: the cleanest setting to watch Gibbs weighting work.
+    """
+    rng = np.random.default_rng(seed)
+    n = len(columns)
+    vol = rng.uniform(0.10, 0.40, n)
+    drift = rng.normal(0.07, 0.05, n)
+    rets = rng.normal((drift - vol**2 / 2) / WINDOW, vol / np.sqrt(WINDOW), (len(index), n))
+    return pd.DataFrame(100 * np.exp(rets.cumsum(axis=0)), index=index, columns=list(columns))
+
+
+def optimal_temperature(prices: pd.DataFrame, start, end, temps=range(2, 51)) -> int:
+    """T whose buy-and-hold Gibbs portfolio had the best return/volatility from `start` to `end`.
+
+    Hindsight: it uses prices up to `end`, so it shows what would have worked, not a forecast.
+    """
+    risk = risk_on(prices, start)
+
+    def score(T):
+        r = buy_and_hold(prices, gibbs_weights(risk, T), start).loc[:end].pct_change().dropna()
+        return r.mean() / r.std() if len(r) > 1 and r.std() > 0 else -np.inf
+
+    return max(temps, key=score)

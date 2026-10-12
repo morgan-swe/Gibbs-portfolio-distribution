@@ -5,7 +5,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from lab.core import buy_and_hold, gibbs_rebalanced, gibbs_weights, max_drawdown, risk_on, rolling_vol
+from lab.core import buy_and_hold, gibbs_rebalanced, gibbs_weights, max_drawdown, optimal_temperature, risk_on, rolling_vol, simulate_prices
 
 HERE = Path(__file__).resolve().parent
 LOGO = HERE / "assets" / "ucquants_logo.jpeg"
@@ -20,7 +20,6 @@ SECTORS = {
 # Every line differs by color AND dash style, and is named in the legend.
 STYLE = {
     "Your picks": ("#2B50D6", "solid"),
-    "Equal weight": ("#6B7280", "dot"),
     "Gibbs (hold)": ("#C2571A", "dash"),
     "Gibbs (rebalanced)": ("#C026D3", "dashdot"),
 }
@@ -29,7 +28,7 @@ st.set_page_config(page_title="Gibbs Portfolio Lab", page_icon=str(LOGO), layout
 st.logo(str(LOGO), size="large")
 st.markdown(
     """<style>
-    .block-container {padding-top: 2rem;}
+    .block-container {padding-top: 2.5rem;}
     .eyebrow {font-family: monospace; letter-spacing: .12em; font-size: .75rem; color: #6B7280;}
     .muted {color: #6B7280; font-size: .85rem;}
     .gibbs {color: #C2571A; font-family: monospace; padding-top: .55rem;}
@@ -40,23 +39,30 @@ st.markdown(
 
 
 @st.cache_data
-def load_prices():
-    return pd.read_csv(HERE / "data" / "prices.csv", index_col="date", parse_dates=True)[list(SECTORS)]
+def load_prices(seed=None):
+    """Real prices, or a random simulated market on the same calendar when `seed` is given."""
+    real = pd.read_csv(HERE / "data" / "prices.csv", index_col="date", parse_dates=True)[list(SECTORS)]
+    return real if seed is None else simulate_prices(real.index, SECTORS, seed)
 
 
 @st.cache_data
-def run_hold(dollars: tuple):
-    return buy_and_hold(load_prices(), pd.Series(dollars, index=list(SECTORS)), START)
+def run_hold(dollars: tuple, seed):
+    return buy_and_hold(load_prices(seed), pd.Series(dollars, index=list(SECTORS)), START)
 
 
 @st.cache_data
-def run_rebalanced(T, freq):
-    return gibbs_rebalanced(load_prices(), T, freq, COST_BPS, START)
+def run_rebalanced(T, freq, seed):
+    return gibbs_rebalanced(load_prices(seed), T, freq, COST_BPS, START)
 
 
 @st.cache_data
-def risk_at(date):
-    return risk_on(load_prices(), date)
+def best_T(date, seed):
+    return optimal_temperature(load_prices(seed), START, date)
+
+
+@st.cache_data
+def risk_at(date, seed):
+    return risk_on(load_prices(seed), date)
 
 
 prices = load_prices()
@@ -84,13 +90,35 @@ left, mid, right = st.columns([1.1, 1, 1.1], gap="medium")
 # Controls first, since the allocation column needs T.
 with mid, st.container(border=True):
     st.subheader("Controls", anchor=False)
+    mode = st.radio("Test against", ["Historical data", "Random simulation"], horizontal=True)
+    seed = None
+    if mode == "Random simulation":
+        seed = st.number_input("Random seed (new seed = new random market)", min_value=0, value=42, step=1)
+        st.caption(
+            "Each sector gets a random, fixed risk level and prices follow a random walk. "
+            "Same calendar as the real data, but none of the prices are real."
+        )
     date = st.select_slider(
         "Simulation date", options=months, value=months[0], format_func=lambda d: d.strftime("%b %d, %Y"), key="sim_date",
     )
     T = st.slider("Temperature (T)", min_value=2, max_value=50, value=10)
-    a, b = st.columns(2)
-    a.markdown('<div class="muted">Low T: only the calmest sectors</div>', unsafe_allow_html=True)
-    b.markdown('<div class="muted" style="text-align:right">High T: spread evenly</div>', unsafe_allow_html=True)
+    if date > START:
+        opt = best_T(date, seed)
+        pct = (opt - 2) / 48 * 100
+        # One line of HTML: indented lines would be parsed as a markdown code block.
+        st.markdown(
+            f'<div style="position:relative;height:6px;margin:1.6rem .5rem .4rem;background:#E5E7EB;border-radius:3px">'
+            f'<div style="position:absolute;left:{pct}%;transform:translateX(-50%);top:-1.4rem;color:#C2571A;'
+            f'font:600 .8rem monospace;white-space:nowrap">T={opt}</div>'
+            f'<div style="position:absolute;left:{pct}%;transform:translateX(-50%);top:-4px;width:14px;height:14px;'
+            f'border-radius:50%;background:#C2571A;opacity:.45"></div></div>'
+            f'<div class="muted">Shadow: optimized T = <b>{opt}</b> (best return per unit of volatility, '
+            f'Jan 2, 2019 to {date:%b %d, %Y}, hindsight)</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown('<div class="muted">Drag the date forward to see the optimized T.</div>', unsafe_allow_html=True)
+
     freq = st.selectbox("Re-calculate risk", ["Never", "Yearly", "Quarterly"]).lower()
     with st.container(border=True):
         st.markdown("**How the Gibbs portfolio picks**")
@@ -101,7 +129,7 @@ with mid, st.container(border=True):
             "high T spreads money almost evenly."
         )
 
-risk0 = risk_at(START)
+risk0 = risk_at(START, seed)
 gibbs_dollars = gibbs_weights(risk0, T) * CAPITAL
 
 with left, st.container(border=True):
@@ -126,19 +154,18 @@ with left, st.container(border=True):
     # 11 inputs of $9,091 add to $100,001, so allow a few dollars of rounding and scale to exactly $100,000.
     picks_ok = abs(total - CAPITAL) <= len(SECTORS)
     if not picks_ok:
-        st.warning(f"Your picks add up to ${total:,}. They must add up to exactly $100,000 before your line is drawn.")
+        st.warning(f"Your picks add up to \\${total:,}. They must add up to exactly \\$100,000 before your line is drawn.")
     elif total != CAPITAL:
         st.caption(f"Rounding: your ${total:,} is scaled to exactly $100,000.")
 
 # Strategies
 series = {}
 if picks_ok:
-    series["Your picks"] = run_hold(tuple(v * CAPITAL / total for v in picks.values()))
-series["Equal weight"] = run_hold(tuple([CAPITAL / len(SECTORS)] * len(SECTORS)))
-series["Gibbs (hold)"] = run_hold(tuple(gibbs_dollars))
+    series["Your picks"] = run_hold(tuple(v * CAPITAL / total for v in picks.values()), seed)
+series["Gibbs (hold)"] = run_hold(tuple(gibbs_dollars), seed)
 rebal_dates, costs = [], pd.Series(dtype=float)
 if freq != "never":
-    series["Gibbs (rebalanced)"], rebal_dates, costs, _ = run_rebalanced(T, freq)
+    series["Gibbs (rebalanced)"], rebal_dates, costs, _ = run_rebalanced(T, freq, seed)
 
 with right, st.container(border=True):
     st.subheader(f"On {date:%b %d, %Y}", anchor=False)
@@ -183,7 +210,7 @@ fig.update_layout(
 st.plotly_chart(fig, width="stretch")
 
 # Risk per sector
-risk_now = risk_at(date)
+risk_now = risk_at(date, seed)
 order = risk0.sort_values().index
 labels = [SECTORS[t] for t in order]
 bars = go.Figure()
